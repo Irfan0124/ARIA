@@ -1,0 +1,37 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.voice_env/
+# Godot
+.godot/
+.import/
+
+# Temporary files
+*.tmp
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Additional environments
+voice_env/
+aria_female_test.wav
+
+# Secrets
+.env
+**/.env
+
+# AI model assets
+voice/models/
+
+# Local test recordings
+backend/*.wav
+backend/aria_memory.db
+
+# Old test scripts
+backend/test_gemini_tts.py
+backend/test_gemini_voices.py

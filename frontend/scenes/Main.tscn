@@ -1,0 +1,67 @@
+[gd_scene format=3 uid="uid://dl846gpl3ho0e"]
+
+[ext_resource type="Script" uid="uid://ddxs2tkaei3eh" path="res://scripts/main.gd" id="1"]
+[ext_resource type="PackedScene" uid="uid://cspqeh5ffgd5c" path="res://Scene/AriaCharacter.tscn" id="2_rvslj"]
+
+[node name="ARIA" type="Control" unique_id=519204546]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+
+[node name="Margin" type="MarginContainer" parent="." unique_id=1751654373]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Layout" type="VBoxContainer" parent="Margin" unique_id=1106650887]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Header" type="Label" parent="Margin/Layout" unique_id=869045973]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "ARIA  •  Local AI Companion"
+
+[node name="Status" type="Label" parent="Margin/Layout" unique_id=1136537200]
+layout_mode = 2
+text = "Menghubungkan ke backend..."
+
+[node name="ChatLog" type="RichTextLabel" parent="Margin/Layout" unique_id=762944355]
+layout_mode = 2
+size_flags_vertical = 3
+bbcode_enabled = true
+text = "[color=gray]Halo! Aku ARIA. Kirim pesan untuk memulai.[/color]"
+scroll_following = true
+
+[node name="InputRow" type="HBoxContainer" parent="Margin/Layout" unique_id=328395145]
+layout_mode = 2
+
+[node name="MessageInput" type="LineEdit" parent="Margin/Layout/InputRow" unique_id=701702899]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Ketik pesan untuk ARIA..."
+
+[node name="SendButton" type="Button" parent="Margin/Layout/InputRow" unique_id=344851422]
+layout_mode = 2
+text = "Kirim"
+
+[node name="MicButton" type="Button" parent="Margin/Layout/InputRow" unique_id=1755907409]
+layout_mode = 2
+text = "."
+
+[node name="BackendRequest" type="HTTPRequest" parent="." unique_id=1258278222]
+
+[node name="AriaCharacter" parent="." unique_id=1287688367 instance=ExtResource("2_rvslj")]
+position = Vector2(500, 350)
+scale = Vector2(2, 2)

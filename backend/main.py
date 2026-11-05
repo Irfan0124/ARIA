@@ -19,7 +19,9 @@ import asyncio
 from faster_whisper import WhisperModel
 from fastapi import UploadFile, File
 load_dotenv(Path(__file__).with_name(".env"))
-
+import numpy as np
+from fastapi import WebSocket, WebSocketDisconnect
+from scipy.signal import resample_poly
 
 OLLAMA_URL = os.getenv(
     "OLLAMA_URL", "http://127.0.0.1:11434"
@@ -51,7 +53,16 @@ def load_supertonic():
 STT_MODEL_SIZE = "small"
 STT_DEVICE = "cpu"
 STT_COMPUTE_TYPE = "int8"
+# =========================
+# LOCAL OPENWAKEWORD
+# =========================
 
+WAKEWORD_MODEL_PATH = (
+    Path(__file__).parent / "models" / "hey_aria_v4.onnx"
+)
+
+WAKEWORD_THRESHOLD = 0.90
+WAKEWORD_DEBOUNCE = 2.0
 stt_lock = threading.Lock()
 
 
@@ -78,6 +89,20 @@ def transcribe_audio(audio_path: str, whisper_model):
         ).strip()
 
     return text
+def load_wakeword():
+    from openwakeword.model import Model
+
+    if not WAKEWORD_MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Model wake word tidak ditemukan: {WAKEWORD_MODEL_PATH}"
+        )
+
+    model = Model(
+        wakeword_models=[str(WAKEWORD_MODEL_PATH)],
+        inference_framework="onnx",
+    )
+
+    return model
 # =========================
 # SQLITE MEMORY
 # =========================
@@ -281,6 +306,17 @@ async def lifespan(app: FastAPI):
     app.state.whisper = await asyncio.to_thread(
         load_whisper
     )
+    # Muat model OpenWakeWord saat startup.
+    print("[ARIA WAKE WORD] Memuat model Hey ARIA...")
+
+    app.state.wakeword = await asyncio.to_thread(
+        load_wakeword
+    )
+    print(
+        "[ARIA WAKE WORD] Label model:",
+        list(app.state.wakeword.models.keys())
+    )
+    print("[ARIA WAKE WORD] Model Hey ARIA siap digunakan.")
 
     print("[ARIA STT] Faster-Whisper siap digunakan.")
 
@@ -736,3 +772,84 @@ async def speech_to_text(audio: UploadFile = File(...)):
             os.remove(temp_path)
 
         await audio.close()
+
+# =========================
+# LOCAL OPENWAKEWORD WEBSOCKET
+# =========================
+
+from math import gcd
+
+# Isi sesuai "[ARIA] Mix rate" di output Godot (44100 atau 48000).
+WAKE_INPUT_RATE = 48000
+WAKE_TARGET_RATE = 16000
+_g = gcd(WAKE_TARGET_RATE, WAKE_INPUT_RATE)
+WAKE_UP = WAKE_TARGET_RATE // _g
+WAKE_DOWN = WAKE_INPUT_RATE // _g
+
+
+@app.websocket("/wakeword")
+async def wakeword_websocket(websocket: WebSocket):
+    await websocket.accept()
+
+    wakeword = app.state.wakeword
+    model_label = list(wakeword.models.keys())[0]
+
+    print("[ARIA WAKE WORD] Godot terhubung.")
+    print(f"[ARIA WAKE WORD] Resample {WAKE_INPUT_RATE} -> {WAKE_TARGET_RATE} Hz")
+
+    last_detection = 0.0
+
+    try:
+        while True:
+            audio_chunk = await websocket.receive_bytes()
+
+            audio_data = np.frombuffer(audio_chunk, dtype=np.int16)
+
+            if audio_data.size == 0:
+                continue
+
+            resampled = resample_poly(
+                audio_data.astype(np.float32),
+                WAKE_UP,
+                WAKE_DOWN
+            )
+            audio_data = np.clip(resampled, -32768, 32767).astype(np.int16)
+
+            if audio_data.size == 0:
+                continue
+
+            scores = wakeword.predict(audio_data)
+            current_score = float(scores[model_label])
+
+            if current_score > 0.3:
+                print(f"[ARIA DEBUG] Score: {current_score:.4f}")
+
+            if current_score >= WAKEWORD_THRESHOLD:
+                now = asyncio.get_running_loop().time()
+
+                if now - last_detection >= WAKEWORD_DEBOUNCE:
+                    last_detection = now
+                    wakeword.reset()
+
+                    print(
+                        f"[ARIA WAKE WORD] Hey ARIA terdeteksi! "
+                        f"Score: {current_score:.4f}"
+                    )
+
+                    await websocket.send_json({
+                        "event": "wake_detected",
+                        "score": current_score
+                    })
+
+    except WebSocketDisconnect:
+        print("[ARIA WAKE WORD] Godot terputus.")
+
+    except Exception as exc:
+        import traceback
+        print(f"[ARIA WAKE WORD ERROR] {repr(exc)}")
+        traceback.print_exc()
+
+        try:
+            await websocket.close()
+        except Exception:
+            pass

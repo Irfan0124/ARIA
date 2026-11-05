@@ -13,6 +13,19 @@ const CONNECT_TIMEOUT := 10.0
 @onready var aria_character = $AriaCharacter
 
 var is_busy := false
+# =========================
+# WAKE WORD
+# =========================
+var heard_speech := false
+var record_time := 0.0
+const GRACE_TIME := 0.8      # abaikan ekor "Hey ARIA"
+const START_TIMEOUT := 6.0   # batal kalau tidak ada yang bicara
+const MAX_RECORD := 15.0
+var wake_socket := WebSocketPeer.new()
+var wake_socket_connected := false
+var wake_audio_buffer := PackedByteArray()
+var wake_chunk_size := 7056
+var wake_frame_buffer := PackedVector2Array()
 var current_request := ""
 var animation_session := 0
 var chat_visible := false
@@ -37,7 +50,11 @@ var mic_capture: AudioEffectCapture
 var is_stt_request_active := false
 var is_recording := false
 var recorded_audio := PackedVector2Array()
+var silence_duration := 0.0
+const SILENCE_LIMIT := 1.5
+const SILENCE_THRESHOLD := 0.04
 var stt_request: HTTPRequest
+var wake_retry := 0.0
 func _ready() -> void:
 	send_button.pressed.connect(_send_message)
 	mic_button.button_down.connect(_start_recording)
@@ -70,6 +87,8 @@ func _ready() -> void:
 
 	$Margin.hide()
 	_setup_microphone()
+	print("[ARIA] Mix rate: ", AudioServer.get_mix_rate())
+	_connect_wakeword()
 	_check_backend()
 	_play_intro()
 
@@ -94,27 +113,107 @@ func _setup_microphone() -> void:
 	mic_player.stream = AudioStreamMicrophone.new()
 	mic_player.bus = "Record"
 	add_child(mic_player)
-
+	mic_player.play()
 	print("[ARIA STT] Mikrofon siap digunakan.")
-func _process(_delta: float) -> void:
-	if not is_recording or mic_capture == null:
+
+func _process(delta: float) -> void:
+
+	wake_socket.poll()
+	if wake_socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		_check_wakeword_event()
+	var socket_open := (
+		wake_socket.get_ready_state() == WebSocketPeer.STATE_OPEN
+	)
+
+	if socket_open and not wake_socket_connected:
+		wake_socket_connected = true
+		print("[ARIA WAKE WORD] Terhubung ke backend.")
+
+	elif not socket_open:
+		wake_socket_connected = false
+
+		if wake_socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
+			wake_retry += delta
+			if wake_retry >= 3.0:
+				wake_retry = 0.0
+				_connect_wakeword()
+
+	if mic_capture == null:
 		return
 
 	var available := mic_capture.get_frames_available()
 
-	if available > 0:
-		var frames := mic_capture.get_buffer(available)
+	if available <= 0:
+		return
+
+	var frames := mic_capture.get_buffer(available)
+	if Engine.get_process_frames() % 120 == 0:
+		var pk := 0.0
+		for s in frames:
+			pk = maxf(pk, absf(s.x))
+
+
+	if is_recording:
 		recorded_audio.append_array(frames)
 
+		var level := 0.0
+		for sample in frames:
+			level = maxf(level, absf(sample.x))
+			level = maxf(level, absf(sample.y))
+
+		var dt := float(frames.size()) / AudioServer.get_mix_rate()
+		record_time += dt
+
+		if record_time > GRACE_TIME:
+			if level >= SILENCE_THRESHOLD:
+				heard_speech = true
+				silence_duration = 0.0
+			elif heard_speech:
+				silence_duration += dt
+
+		if heard_speech and silence_duration >= SILENCE_LIMIT:
+			print("[ARIA MIC] Selesai bicara.")
+			_stop_recording()
+		elif not heard_speech and record_time >= START_TIMEOUT:
+			print("[ARIA MIC] Tidak ada suara.")
+			_stop_recording()
+		elif record_time >= MAX_RECORD:
+			_stop_recording()
+
+		return
+	if not socket_open:
+		return
+
+	if audio_player.playing or is_busy:
+		wake_frame_buffer.clear()
+		return
+
+	wake_frame_buffer.append_array(frames)
+
+	while wake_frame_buffer.size() >= 3840:
+		var chunk := wake_frame_buffer.slice(0, 3840)
+		wake_frame_buffer = wake_frame_buffer.slice(3840)
+
+		var audio_bytes := _convert_wake_audio(chunk)
+
+
+
+		wake_socket.send(
+			audio_bytes,
+			WebSocketPeer.WRITE_MODE_BINARY
+		)
 func _start_recording() -> void:
-	if is_busy or mic_player == null or mic_capture == null:
+	if is_busy or is_recording or mic_player == null or mic_capture == null:
 		return
 
 	recorded_audio.clear()
+	silence_duration = 0.0
+	heard_speech = false
+	record_time = 0.0
 	mic_capture.clear_buffer()
 
 	is_recording = true
-	mic_player.play()
+
 
 	mic_button.text = "🔴"
 	status_label.text = "Mendengarkan..."
@@ -124,7 +223,7 @@ func _stop_recording() -> void:
 		return
 
 	is_recording = false
-	mic_player.stop()
+
 
 	var available := mic_capture.get_frames_available()
 
@@ -144,6 +243,9 @@ func _stop_recording() -> void:
 	print("[ARIA MIC] Sample rate: ", AudioServer.get_mix_rate())
 
 	mic_button.text = "🎙"
+	if not heard_speech:
+		status_label.text = "Tidak ada suara terdeteksi."
+		return
 	mic_button.disabled = true
 
 	if recorded_audio.size() < 1000:
@@ -768,3 +870,44 @@ func _notification(what: int) -> void:
 			)
 
 		is_closing_to_tray = false
+
+func _connect_wakeword() -> void:
+	var err := wake_socket.connect_to_url(
+		"ws://127.0.0.1:8765/wakeword"
+	)
+
+	if err != OK:
+		push_error("[ARIA WAKE WORD] Gagal memulai koneksi.")
+		return
+
+	print("[ARIA WAKE WORD] Menghubungkan ke backend...")
+
+func _convert_wake_audio(frames: PackedVector2Array) -> PackedByteArray:
+	var audio_bytes := PackedByteArray()
+	audio_bytes.resize(frames.size() * 2)
+
+	for i in range(frames.size()):
+		var mono := (frames[i].x + frames[i].y) * 0.5
+		var sample := int(clamp(mono, -1.0, 1.0) * 32767.0)
+
+		audio_bytes.encode_s16(i * 2, sample)
+
+	return audio_bytes
+
+func _check_wakeword_event() -> void:
+	while wake_socket.get_available_packet_count() > 0:
+		var packet := wake_socket.get_packet()
+
+		if wake_socket.was_string_packet():
+			var message := packet.get_string_from_utf8()
+			var data = JSON.parse_string(message)
+
+			if data == null:
+				continue
+
+			if data.get("event", "") == "wake_detected":
+				print(
+				"[ARIA WAKE WORD] Hey ARIA terdeteksi! Score: ",
+				data.get("score", 0.0)
+				)
+				_start_recording()

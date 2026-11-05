@@ -31,7 +31,7 @@ theme_override_constants/separation = 12
 [node name="Header" type="Label" parent="Margin/Layout" unique_id=869045973]
 layout_mode = 2
 theme_override_font_sizes/font_size = 24
-text = "ARIA  •  Local AI Companion"
+text = "ARIA  • My Bini Gweh"
 
 [node name="Status" type="Label" parent="Margin/Layout" unique_id=1136537200]
 layout_mode = 2
